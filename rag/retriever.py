@@ -138,7 +138,12 @@ def hybrid_search(course_id: str, query: str,
         key=lambda x: x[1],
         reverse=True
     )
-    return [doc for doc, _ in reranked[:config.TOP_K_RERANK]]
+    MIN_RELEVANCE = 0.10
+    filtered = [
+        doc for doc, score in reranked[:config.TOP_K_RERANK]
+        if float(score) >= MIN_RELEVANCE
+    ]
+    return filtered
 
 def _rrf_merge(list_a: list, list_b: list, k: int = 60) -> list:
     """Reciprocal Rank Fusion of two ranked lists."""

@@ -242,7 +242,13 @@ def _render_course_portal(student_id: str):
                 st.write(result["answer"])
                 phase = result.get("phase", "")
 
-                if phase == "question":
+                if phase == "no_content":
+                    st.warning(
+                        "No course material found for this topic. "
+                        "Go to the Upload Materials tab to add "
+                        "relevant files."
+                    )
+                elif phase == "question":
                     st.caption("Guiding question")
                 elif phase == "brief_explain":
                     st.caption("Hint + follow-up")

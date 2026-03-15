@@ -102,12 +102,18 @@ def answer_question(course_id: str, question: str,
     # ── Retrieve relevant chunks ──────────────────────────────
     chunks = hybrid_search(course_id, question)
 
+    # ── Guard: no relevant content found ─────────────────────
     if not chunks:
         return {
-            "answer":   FALLBACK_MESSAGE,
-            "source":   None,
+            "answer": (
+                "I could not find any relevant content "
+                "in your course materials for this question.\n\n"
+                "Try uploading lecture notes or slides that "
+                "cover this topic, then ask again."
+            ),
+            "source":     None,
             "confidence": 0.0,
-            "phase":    "fallback"
+            "phase":      "no_content"
         }
 
     # Top 2 chunks only — keeps context short and focused

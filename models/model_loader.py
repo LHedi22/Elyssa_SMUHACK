@@ -36,3 +36,15 @@ def call_llm(model: str, system_prompt: str, user_prompt: str,
         timeout=120
     )
     return response.json()["response"].strip()
+
+# Add to models/model_loader.py
+
+_embedder = None
+
+def get_embedder():
+    global _embedder
+    if _embedder is None:
+        from sentence_transformers import SentenceTransformer
+        import config
+        _embedder = SentenceTransformer(config.EMBED_MODEL)
+    return _embedder
