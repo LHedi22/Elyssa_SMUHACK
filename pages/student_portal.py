@@ -188,9 +188,9 @@ def _render_course_portal(student_id: str):
     st.divider()
 
     # ── Tabs ──────────────────────────────────────────────────
-    tab_tutor, tab_quiz, tab_progress, tab_upload = st.tabs([
+    tab_tutor, tab_quiz, tab_progress, tab_upload, tab_suggest = st.tabs([
         "Tutor Chat", "Quiz",
-        "My Progress", "Upload Materials"
+        "My Progress", "Upload Materials", "Suggestions"
     ])
 
     # ══════════════════════════════════════════════════════════
@@ -209,20 +209,38 @@ def _render_course_portal(student_id: str):
                         turn.get("phase") == "explanation":
                     st.caption(turn["source"])
 
-        question = st.chat_input(
-            "Ask a question about your course..."
+
+
+        # Pre-fill from suggestions action
+        prefill = st.session_state.pop(
+            "suggested_message", None
         )
+        if prefill:
+            st.info(
+                f"Suggested question loaded: *{prefill}*"
+            )
+
+        question = st.chat_input(
+            "Ask a question about your course...",
+            key="tutor_chat_input"
+        )
+
+
+
         if question:
             with st.spinner("Thinking..."):
                 result = answer_question(
                     course_id, question,
                     st.session_state.chat_history
                 )
+
             with st.chat_message("user"):
                 st.write(question)
+
             with st.chat_message("assistant"):
                 st.write(result["answer"])
                 phase = result.get("phase", "")
+
                 if phase == "question":
                     st.caption("Guiding question")
                 elif phase == "brief_explain":
@@ -239,11 +257,38 @@ def _render_course_portal(student_id: str):
                     st.caption(
                         "Not found in course materials"
                     )
+
+            # ── Update mastery based on interaction ───────
+            from agents.analytics import (
+                record_tutor_interaction,
+                record_question_asked,
+                detect_topic_from_chunks
+            )
+            from rag.retriever import hybrid_search
+
+            # Detect which topic this question is about
+            chunks = hybrid_search(course_id, question)
+            topic  = detect_topic_from_chunks(chunks)
+
+            phase = result.get("phase", "")
+
+            # Small signal just for engaging
+            record_question_asked(
+                student_id, course_id, topic
+            )
+
+            # Larger signal based on phase quality
+            understood = (phase == "explanation")
+            record_tutor_interaction(
+                student_id, course_id,
+                topic, phase, understood
+            )
+
             st.session_state.chat_history.append({
                 "q":      question,
                 "a":      result["answer"],
                 "source": result.get("source"),
-                "phase":  result.get("phase")
+                "phase":  phase
             })
 
     # ══════════════════════════════════════════════════════════
@@ -494,31 +539,91 @@ def _render_course_portal(student_id: str):
     # ══════════════════════════════════════════════════════════
     with tab_progress:
         st.subheader("Your Mastery Map")
+        st.caption(
+            "Updated after every quiz answer, "
+            "tutor explanation, and question asked."
+        )
+
+        from database.mongo_client import get_mastery
         from rag.retriever import get_chapters
-        chapters = get_chapters(course_id)
+
+        # Load mastery from MongoDB — persists across sessions
+        mastery_data = get_mastery(student_id, course_id)
+        chapters     = get_chapters(course_id)
 
         if not chapters:
             st.info(
                 "Upload course materials to see "
-                "your progress."
+                "your progress here."
             )
         else:
+            # Summary metrics
+            if mastery_data:
+                scores = list(mastery_data.values())
+                avg    = sum(scores) / len(scores)
+                strong = sum(1 for s in scores if s >= 0.80)
+                weak   = sum(1 for s in scores if s < 0.50)
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric(
+                    "Average mastery",
+                    f"{avg:.0%}"
+                )
+                c2.metric(
+                    "Topics mastered",
+                    f"{strong}/{len(chapters)}"
+                )
+                c3.metric(
+                    "Topics needing work",
+                    weak
+                )
+                st.divider()
+
+            # Per-chapter mastery bars
             for ch in chapters:
-                mastery = st.session_state.get(
-                    f"mastery_{ch}", 0.15
-                )
-                color = (
-                    "🟢" if mastery >= 0.80 else
-                    "🟡" if mastery >= 0.50 else
-                    "🔴"
-                )
-                ca, cb, cc = st.columns([3, 5, 2])
-                with ca:
-                    st.write(f"{color} {ch}")
-                with cb:
-                    st.progress(mastery)
-                with cc:
+                # Read from DB, fall back to 0.15 if
+                # student hasn't touched this chapter yet
+                mastery = mastery_data.get(ch, 0.15)
+
+                if mastery >= 0.80:
+                    icon   = "🟢"
+                    status = "Mastered"
+                    color  = "normal"
+                elif mastery >= 0.50:
+                    icon   = "🟡"
+                    status = "In progress"
+                    color  = "normal"
+                else:
+                    icon   = "🔴"
+                    status = "Needs work"
+                    color  = "inverse"
+
+                col_a, col_b, col_c, col_d = \
+                    st.columns([3, 4, 1, 2])
+
+                with col_a:
+                    st.write(f"{icon} **{ch}**")
+                with col_b:
+                    st.progress(float(mastery))
+                with col_c:
                     st.write(f"{mastery:.0%}")
+                with col_d:
+                    st.caption(status)
+
+            st.divider()
+
+            # Legend
+            st.caption(
+                "🟢 Mastered (≥80%)  "
+                "🟡 In progress (50–79%)  "
+                "🔴 Needs work (<50%)"
+            )
+            st.caption(
+                "Mastery increases through: "
+                "quiz answers (+BKT), "
+                "tutor explanations (+5–8%), "
+                "questions asked (+1–2%)"
+            )
 
     # ══════════════════════════════════════════════════════════
     # UPLOAD TAB
@@ -658,3 +763,181 @@ def _render_course_portal(student_id: str):
             st.caption(
                 "No chapters yet — upload files above."
             )
+    
+
+    # ══════════════════════════════════════════════════════════
+    # SUGGESTIONS TAB
+    # ══════════════════════════════════════════════════════════
+    with tab_suggest:
+        st.subheader("Personalised Suggestions")
+        st.caption(
+            "Analysed from your quiz scores, "
+            "tutor conversations, mastery progress, "
+            "and study behaviour."
+        )
+
+        # Optional exam date input
+        with st.expander("Set exam date (optional)"):
+            exam_date = st.date_input(
+                "Your exam date",
+                key="exam_date_input",
+                value=None
+            )
+            exam_days = None
+            if exam_date:
+                from datetime import date
+                exam_days = (exam_date - date.today()).days
+                if exam_days < 0:
+                    st.warning("That date is in the past.")
+                    exam_days = None
+                else:
+                    st.info(
+                        f"Exam in {exam_days} days — "
+                        "suggestions will factor this in."
+                    )
+
+        st.divider()
+
+        if st.button(
+            "Analyse my progress",
+            key="generate_suggestions_btn",
+            use_container_width=True
+        ):
+            from agents.suggestions import generate_suggestions
+            from rag.retriever import get_chapters
+
+            chapters = get_chapters(course_id)
+
+            if not chapters:
+                st.warning(
+                    "No course material uploaded yet. "
+                    "Upload files to get personalised suggestions."
+                )
+            else:
+                with st.spinner(
+                    "Analysing your study data..."
+                ):
+                    suggestions = generate_suggestions(
+                        student_id=student_id,
+                        course_id=course_id,
+                        chapters=chapters,
+                        exam_days=exam_days
+                    )
+
+                st.session_state.suggestions = suggestions
+                st.session_state.suggestions_chapters = chapters
+
+        # ── Display suggestions ───────────────────────────────
+        suggestions = st.session_state.get("suggestions", [])
+
+        if not suggestions:
+            st.info(
+                "Click 'Analyse my progress' to get "
+                "personalised suggestions based on your "
+                "study data."
+            )
+        else:
+            # Group by priority
+            critical = [
+                s for s in suggestions
+                if s["priority"] == "critical"
+            ]
+            warning  = [
+                s for s in suggestions
+                if s["priority"] == "warning"
+            ]
+            info     = [
+                s for s in suggestions
+                if s["priority"] == "info"
+            ]
+            success  = [
+                s for s in suggestions
+                if s["priority"] == "success"
+            ]
+
+            # Count badge
+            total = len(suggestions)
+            st.write(
+                f"**{total} suggestion(s) found "
+                f"based on your study data**"
+            )
+            st.write("")
+
+            # Render each group
+            def render_group(items, color_fn):
+                for s in items:
+                    color_fn(
+                        f"**[{s['category']}]  "
+                        f"{s['title']}**\n\n"
+                        f"{s['body']}"
+                    )
+                    # Action button
+                    if s.get("action") and \
+                            s.get("action_data"):
+                        btn_key = (
+                            f"suggestion_action_"
+                            f"{s['title'][:20].replace(' ', '_')}"
+                        )
+                        if st.button(
+                            f"{s['action']} →",
+                            key=btn_key
+                        ):
+                            ad = s["action_data"]
+                            tab_target = ad.get("tab")
+
+                            # Pre-fill tutor message
+                            if tab_target == "tutor" and \
+                                    ad.get("message"):
+                                st.session_state\
+                                    .suggested_message = \
+                                    ad["message"]
+                                st.info(
+                                    "Go to the Tutor Chat tab "
+                                    "— your question is ready."
+                                )
+
+                            # Pre-select quiz chapter
+                            elif tab_target == "quiz" and \
+                                    ad.get("chapter"):
+                                st.session_state\
+                                    .suggested_chapter = \
+                                    ad["chapter"]
+                                st.session_state\
+                                    .suggested_difficulty = \
+                                    ad.get("difficulty", "medium")
+                                st.info(
+                                    "Go to the Quiz tab "
+                                    "— chapter pre-selected."
+                                )
+
+                            elif tab_target == "upload":
+                                st.info(
+                                    "Go to the Upload Materials "
+                                    "tab to add more content."
+                                )
+                    st.write("")
+
+            if critical:
+                st.markdown("### 🔴 Act now")
+                render_group(critical, st.error)
+
+            if warning:
+                st.markdown("### 🟡 Act soon")
+                render_group(warning, st.warning)
+
+            if info:
+                st.markdown("### 🔵 Good to know")
+                render_group(info, st.info)
+
+            if success:
+                st.markdown("### 🟢 Keep it up")
+                render_group(success, st.success)
+
+            # Refresh button
+            st.divider()
+            if st.button(
+                "Refresh suggestions",
+                key="refresh_suggestions"
+            ):
+                st.session_state.pop("suggestions", None)
+                st.rerun()

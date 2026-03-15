@@ -117,3 +117,190 @@ def upsert_student_mastery(student_id: str, course_id: str,
         }},
         upsert=True
     )
+
+# Add to database/mongo_client.py
+
+def get_mastery(student_id: str, course_id: str) -> dict:
+    """
+    Return all mastery scores for a student in a course.
+    Returns dict: {chapter: score}
+    """
+    docs = list(mastery_col.find(
+        {"student_id": student_id, "course_id": course_id},
+        {"_id": 0}
+    ))
+    return {d["topic"]: d["mastery"] for d in docs}
+
+
+def update_mastery(student_id: str,
+                   course_id: str,
+                   topic: str,
+                   new_mastery: float,
+                   source: str = "quiz"):
+    """
+    Upsert mastery score for a student-topic pair.
+    source: 'quiz' | 'tutor' | 'question'
+    """
+    mastery_col.update_one(
+        {
+            "student_id": student_id,
+            "course_id":  course_id,
+            "topic":      topic
+        },
+        {
+            "$set": {
+                "mastery":    round(new_mastery, 4),
+                "updated_at": datetime.now(timezone.utc),
+                "source":     source
+            },
+            "$inc": {"interactions": 1}
+        },
+        upsert=True
+    )
+
+
+def get_topic_interactions(student_id: str,
+                            course_id: str,
+                            topic: str) -> dict:
+    """
+    Return mastery doc for a specific topic.
+    """
+    doc = mastery_col.find_one(
+        {
+            "student_id": student_id,
+            "course_id":  course_id,
+            "topic":      topic
+        },
+        {"_id": 0}
+    )
+    return doc or {
+        "mastery":      0.15,
+        "interactions": 0,
+        "source":       None
+    }
+
+
+# Add to database/mongo_client.py
+
+from datetime import datetime, timezone, timedelta
+
+
+def get_quiz_history(student_id: str,
+                     course_id: str) -> list[dict]:
+    """All quiz answer events for a student in a course."""
+    return list(events_col.find(
+        {
+            "student_id": student_id,
+            "course_id":  course_id,
+            "type":       "quiz_answer"
+        },
+        {"_id": 0}
+    ).sort("timestamp", -1))
+
+
+def get_tutor_history(student_id: str,
+                      course_id: str) -> list[dict]:
+    """All tutor interaction events."""
+    return list(events_col.find(
+        {
+            "student_id": student_id,
+            "course_id":  course_id,
+            "type":       {"$in": [
+                "tutor_interaction",
+                "question_asked"
+            ]}
+        },
+        {"_id": 0}
+    ).sort("timestamp", -1))
+
+
+def get_last_interaction(student_id: str,
+                         course_id: str) -> datetime | None:
+    """Timestamp of the most recent event of any type."""
+    doc = events_col.find_one(
+        {
+            "student_id": student_id,
+            "course_id":  course_id
+        },
+        {"_id": 0, "timestamp": 1},
+        sort=[("timestamp", -1)]
+    )
+    return doc["timestamp"] if doc else None
+
+
+def get_last_interaction_per_topic(
+        student_id: str,
+        course_id: str) -> dict:
+    """
+    Returns {topic: last_interaction_datetime}
+    for all topics the student has interacted with.
+    """
+    pipeline = [
+        {
+            "$match": {
+                "student_id": student_id,
+                "course_id":  course_id,
+                "topic":      {"$exists": True}
+            }
+        },
+        {
+            "$group": {
+                "_id":          "$topic",
+                "last_seen":    {"$max": "$timestamp"},
+                "interactions": {"$sum": 1}
+            }
+        }
+    ]
+    results = list(events_col.aggregate(pipeline))
+    return {
+        r["_id"]: r["last_seen"]
+        for r in results
+        if r["_id"]
+    }
+
+
+def get_session_dates(student_id: str,
+                      course_id: str) -> list[datetime]:
+    """List of unique dates the student had a session."""
+    docs = list(events_col.find(
+        {
+            "student_id": student_id,
+            "course_id":  course_id
+        },
+        {"_id": 0, "timestamp": 1}
+    ).sort("timestamp", -1).limit(50))
+
+    seen  = set()
+    dates = []
+    for d in docs:
+        ts   = d.get("timestamp")
+        date = ts.date() if ts else None
+        if date and date not in seen:
+            seen.add(date)
+            dates.append(ts)
+    return dates
+
+
+def get_fallback_count(student_id: str,
+                       course_id: str,
+                       days: int = 7) -> int:
+    """
+    Count how many tutor responses were fallbacks
+    in the last N days.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    return events_col.count_documents({
+        "student_id": student_id,
+        "course_id":  course_id,
+        "type":       "tutor_interaction",
+        "phase":      "fallback",
+        "timestamp":  {"$gte": since}
+    })
+
+
+def get_chapter_chunk_counts(course_id: str) -> dict:
+    """
+    Returns {chapter: chunk_count} from Qdrant.
+    Requires qdrant client — called from suggestions engine.
+    """
+    pass  # Implemented in suggestions.py directly
