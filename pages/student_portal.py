@@ -30,7 +30,7 @@ def render_student_portal(student_id: str):
 # ─────────────────────────────────────────────────────────────
 
 def _render_course_selection(student_id: str):
-    st.title("StudyMate")
+    st.title("Elyssa")
     st.subheader("My Courses")
 
     courses = get_courses(student_id)
@@ -230,7 +230,8 @@ def _render_course_portal(student_id: str):
         if question:
             with st.spinner("Thinking..."):
                 result = answer_question(
-                    course_id, question,
+                    course_id,
+                    question,
                     st.session_state.chat_history
                 )
 
